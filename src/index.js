@@ -96,7 +96,7 @@ async function getLastPosition(deviceId) {
   return result;
 }
 
-// --- Geocoding: turn lat/lon into "On Road X near Road Y, Suburb" ---
+// --- Geocoding: turn lat/lon into "Road X near Road Y, Suburb" ---
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = d => d * Math.PI / 180;
@@ -122,39 +122,44 @@ async function reverseGeocode(lat, lon) {
 }
 
 async function nearestCrossStreet(lat, lon) {
-  const query = `[out:json][timeout:10];way(around:200,${lat},${lon})[highway][name];out tags geom;`;
-  const resp = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'data=' + encodeURIComponent(query)
-  });
-  if (!resp.ok) return null;
-  const data = await resp.json();
-  if (!data.elements || data.elements.length === 0) return null;
+  for (const radius of [200, 400]) {
+    const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
+    const resp = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(query)
+    });
+    if (!resp.ok) continue;
+    const data = await resp.json();
+    if (!data.elements || data.elements.length === 0) continue;
 
-  const roads = [];
-  for (const el of data.elements) {
-    if (!el.tags || !el.tags.name || !el.geometry) continue;
-    let minDist = Infinity;
-    for (const pt of el.geometry) {
-      const d = haversineMeters(lat, lon, pt.lat, pt.lon);
-      if (d < minDist) minDist = d;
+    const roads = [];
+    for (const el of data.elements) {
+      if (!el.tags || !el.tags.name || !el.geometry) continue;
+      let minDist = Infinity;
+      for (const pt of el.geometry) {
+        const d = haversineMeters(lat, lon, pt.lat, pt.lon);
+        if (d < minDist) minDist = d;
+      }
+      roads.push({ name: el.tags.name, dist: minDist });
     }
-    roads.push({ name: el.tags.name, dist: minDist });
-  }
-  if (roads.length === 0) return null;
+    if (roads.length === 0) continue;
 
-  const seen = new Map();
-  roads.sort((a, b) => a.dist - b.dist);
-  for (const r of roads) {
-    if (!seen.has(r.name)) seen.set(r.name, r.dist);
-  }
-  const distinct = [...seen.entries()].sort((a, b) => a[1] - b[1]);
+    const seen = new Map();
+    roads.sort((a, b) => a.dist - b.dist);
+    for (const r of roads) {
+      if (!seen.has(r.name)) seen.set(r.name, r.dist);
+    }
+    const distinct = [...seen.entries()].sort((a, b) => a[1] - b[1]);
 
-  return {
-    primary: distinct[0] ? distinct[0][0] : null,
-    secondary: distinct[1] ? distinct[1][0] : null
-  };
+    if (distinct.length >= 2) {
+      return { primary: distinct[0][0], secondary: distinct[1][0] };
+    }
+    if (distinct.length === 1 && radius === 400) {
+      return { primary: distinct[0][0], secondary: null };
+    }
+  }
+  return null;
 }
 
 async function buildLocationString(lat, lon) {
@@ -166,16 +171,16 @@ async function buildLocationString(lat, lon) {
   const suburb = geo && geo.suburb ? geo.suburb : '';
 
   if (cross && cross.primary && cross.secondary) {
-    return `On ${cross.primary} near ${cross.secondary}${suburb ? ', ' + suburb : ''}`;
+    return `${cross.primary} near ${cross.secondary}${suburb ? ', ' + suburb : ''}`;
   }
   if (cross && cross.primary) {
-    return `On ${cross.primary}${suburb ? ', ' + suburb : ''}`;
+    return `${cross.primary}${suburb ? ', ' + suburb : ''}`;
   }
   if (geo && geo.road) {
-    return `On ${geo.road}${suburb ? ', ' + suburb : ''}`;
+    return `${geo.road}${suburb ? ', ' + suburb : ''}`;
   }
   if (suburb) {
-    return `Near ${suburb}`;
+    return suburb;
   }
   return `${lat}, ${lon}`;
 }
@@ -189,7 +194,7 @@ function formatReply(position, locationStr) {
   const speed = Number(position.nSpeed);
   const mins = minutesAgo(position.nTime);
   const agoText = mins <= 1 ? 'Updated just now.' : `Updated ${mins} min ago.`;
-  if (speed > 0) return `Moving ${speed}km/h. ${locationStr}. ${agoText}`;
+  if (speed > 0) return `Moving ${speed}km/h. On ${locationStr}. ${agoText}`;
   return `Parked at ${locationStr}. ${agoText}`;
 }
 
@@ -227,4 +232,3 @@ export default {
     return new Response('SinoTrack SMS worker is running.');
   }
 };
-
