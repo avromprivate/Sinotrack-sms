@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sinotrack-sms",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-15",
+  "kv_namespaces": [
+    {
+      "binding": "TRACKER_KV",
+      "id": "3d14984164c74b0ea583519046f8f3a6"
+    }
+  ]
+}
