@@ -126,7 +126,11 @@ async function nearestCrossStreet(lat, lon) {
     const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
     const resp = await fetch('https://overpass-api.de/api/interpreter', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': '*/*',
+        'User-Agent': 'ChavivimFamilyTracker/1.0 (personal SMS tracker, contact via account owner)'
+      },
       body: 'data=' + encodeURIComponent(query)
     });
     if (!resp.ok) continue;
@@ -222,7 +226,11 @@ export default {
         const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
         const resp = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': '*/*',
+            'User-Agent': 'ChavivimFamilyTracker/1.0 (personal SMS tracker, contact via account owner)'
+          },
           body: 'data=' + encodeURIComponent(query)
         });
         const rawText = await resp.text();
