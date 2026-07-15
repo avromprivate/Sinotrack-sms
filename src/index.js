@@ -211,6 +211,33 @@ export default {
       });
     }
 
+    if (url.pathname === '/debug-roads') {
+      const lat = url.searchParams.get('lat');
+      const lon = url.searchParams.get('lon');
+      const radius = url.searchParams.get('radius') || '400';
+      const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
+      const resp = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(query)
+      });
+      const data = await resp.json();
+      const roads = (data.elements || [])
+        .filter(el => el.tags && el.tags.name && el.geometry)
+        .map(el => {
+          let minDist = Infinity;
+          for (const pt of el.geometry) {
+            const d = haversineMeters(lat, lon, pt.lat, pt.lon);
+            if (d < minDist) minDist = d;
+          }
+          return { name: el.tags.name, highway: el.tags.highway, distMeters: Math.round(minDist) };
+        })
+        .sort((a, b) => a.distMeters - b.distMeters);
+      return new Response(JSON.stringify(roads, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     if (url.pathname === '/test-location') {
       const lat = url.searchParams.get('lat');
       const lon = url.searchParams.get('lon');
