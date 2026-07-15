@@ -203,15 +203,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    if (url.pathname === '/test-position') {
-      const deviceId = url.searchParams.get('device') || '9171061904';
-      const position = await getLastPosition(deviceId);
-      return new Response(JSON.stringify(position, null, 2), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (url.pathname === '/debug-roads') {
+if (url.pathname === '/debug-roads') {
       try {
         const lat = url.searchParams.get('lat');
         const lon = url.searchParams.get('lon');
@@ -249,4 +241,4 @@ export default {
       } catch (err) {
         return new Response('Exception: ' + err.message + '\n' + err.stack, { status: 500 });
       }
-    }
+}
