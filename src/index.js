@@ -1,5 +1,6 @@
-// SinoTrack signed API client + test route
-// MD5 implementation (Cloudflare Workers' Web Crypto API does not support MD5 natively)
+// SinoTrack signed API client + geocoding + test routes
+
+// --- MD5 (Cloudflare's Web Crypto API does not support MD5 natively) ---
 function md5(str) {
   function rotl(x, c) { return (x << c) | (x >>> (32 - c)); }
   function toHex(num) {
@@ -51,15 +52,14 @@ function md5(str) {
   return toHex(a0) + toHex(b0) + toHex(c0) + toHex(d0);
 }
 
+// --- SinoTrack signed API ---
 const SINOTRACK_APPID = 'MjQ2LnNpbm90cmFjay5jb20v';
 const SINOTRACK_URL = 'https://246.sinotrack.com/APP/AppJson.asp';
 
 function buildToken(cmd, deviceId, suffix) {
   const raw = cmd + '\x11' + "N'" + deviceId + "'" + '\x11\x11' + '\x1b' + suffix;
-  const bytes = [];
-  for (let i = 0; i < raw.length; i++) bytes.push(raw.charCodeAt(i));
   let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
+  for (let i = 0; i < raw.length; i++) binary += String.fromCharCode(raw.charCodeAt(i));
   return btoa(binary);
 }
 
@@ -89,7 +89,6 @@ async function getLastPosition(deviceId) {
   if (!data.m_isResultOk || !data.m_arrRecord || !data.m_arrRecord[0]) {
     return { error: true, raw: data };
   }
-
   const fields = data.m_arrField;
   const record = data.m_arrRecord[0];
   const result = {};
@@ -97,6 +96,104 @@ async function getLastPosition(deviceId) {
   return result;
 }
 
+// --- Geocoding: turn lat/lon into "On Road X near Road Y, Suburb" ---
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+async function reverseGeocode(lat, lon) {
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&addressdetails=1`;
+  const resp = await fetch(url, {
+    headers: {
+      'User-Agent': 'ChavivimFamilyTracker/1.0 (personal SMS tracker, contact via account owner)'
+    }
+  });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  const addr = data.address || {};
+  const suburb = addr.suburb || addr.city_district || addr.town || addr.city || addr.village || '';
+  return { road: addr.road || '', suburb };
+}
+
+async function nearestCrossStreet(lat, lon) {
+  const query = `[out:json][timeout:10];way(around:200,${lat},${lon})[highway][name];out tags geom;`;
+  const resp = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'data=' + encodeURIComponent(query)
+  });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (!data.elements || data.elements.length === 0) return null;
+
+  const roads = [];
+  for (const el of data.elements) {
+    if (!el.tags || !el.tags.name || !el.geometry) continue;
+    let minDist = Infinity;
+    for (const pt of el.geometry) {
+      const d = haversineMeters(lat, lon, pt.lat, pt.lon);
+      if (d < minDist) minDist = d;
+    }
+    roads.push({ name: el.tags.name, dist: minDist });
+  }
+  if (roads.length === 0) return null;
+
+  const seen = new Map();
+  roads.sort((a, b) => a.dist - b.dist);
+  for (const r of roads) {
+    if (!seen.has(r.name)) seen.set(r.name, r.dist);
+  }
+  const distinct = [...seen.entries()].sort((a, b) => a[1] - b[1]);
+
+  return {
+    primary: distinct[0] ? distinct[0][0] : null,
+    secondary: distinct[1] ? distinct[1][0] : null
+  };
+}
+
+async function buildLocationString(lat, lon) {
+  let cross = null;
+  try { cross = await nearestCrossStreet(lat, lon); } catch (e) { cross = null; }
+
+  let geo = null;
+  try { geo = await reverseGeocode(lat, lon); } catch (e) { geo = null; }
+  const suburb = geo && geo.suburb ? geo.suburb : '';
+
+  if (cross && cross.primary && cross.secondary) {
+    return `On ${cross.primary} near ${cross.secondary}${suburb ? ', ' + suburb : ''}`;
+  }
+  if (cross && cross.primary) {
+    return `On ${cross.primary}${suburb ? ', ' + suburb : ''}`;
+  }
+  if (geo && geo.road) {
+    return `On ${geo.road}${suburb ? ', ' + suburb : ''}`;
+  }
+  if (suburb) {
+    return `Near ${suburb}`;
+  }
+  return `${lat}, ${lon}`;
+}
+
+function minutesAgo(unixSeconds) {
+  const diffSec = Math.floor(Date.now() / 1000) - Number(unixSeconds);
+  return Math.max(0, Math.round(diffSec / 60));
+}
+
+function formatReply(position, locationStr) {
+  const speed = Number(position.nSpeed);
+  const mins = minutesAgo(position.nTime);
+  const agoText = mins <= 1 ? 'Updated just now.' : `Updated ${mins} min ago.`;
+  if (speed > 0) return `Moving ${speed}km/h. ${locationStr}. ${agoText}`;
+  return `Parked at ${locationStr}. ${agoText}`;
+}
+
+// --- Routes ---
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -107,6 +204,24 @@ export default {
       return new Response(JSON.stringify(position, null, 2), {
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+
+    if (url.pathname === '/test-location') {
+      const lat = url.searchParams.get('lat');
+      const lon = url.searchParams.get('lon');
+      const locationStr = await buildLocationString(lat, lon);
+      return new Response(locationStr);
+    }
+
+    if (url.pathname === '/test-full') {
+      const deviceId = url.searchParams.get('device') || '9171061904';
+      const position = await getLastPosition(deviceId);
+      if (position.error) {
+        return new Response('Error fetching position: ' + JSON.stringify(position.raw));
+      }
+      const locationStr = await buildLocationString(position.dbLat, position.dbLon);
+      const reply = formatReply(position, locationStr);
+      return new Response(reply);
     }
 
     return new Response('SinoTrack SMS worker is running.');
