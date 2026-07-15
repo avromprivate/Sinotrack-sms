@@ -96,7 +96,7 @@ async function getLastPosition(deviceId) {
   return result;
 }
 
-// --- Geocoding: turn lat/lon into "Road X near Road Y, Suburb" ---
+// --- Geocoding: turn lat/lon into "On Road X near Road Y, Suburb" ---
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = d => d * Math.PI / 180;
@@ -105,6 +105,46 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   const a = Math.sin(dLat/2)**2 +
             Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Distance from a point to a line segment, using a local flat-earth approximation
+// (accurate enough at this scale — a few hundred metres). This measures true
+// distance to the road itself, not just to the nearest OSM vertex, which matters
+// a lot right at intersections where vertices cluster together.
+function distanceToSegmentMeters(lat, lon, latA, lonA, latB, lonB) {
+  const latRad = lat * Math.PI / 180;
+  const mPerDegLat = 111320;
+  const mPerDegLon = 111320 * Math.cos(latRad);
+
+  const ax = (lonA - lon) * mPerDegLon;
+  const ay = (latA - lat) * mPerDegLat;
+  const bx = (lonB - lon) * mPerDegLon;
+  const by = (latB - lat) * mPerDegLat;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : (-(ax * dx) - (ay * dy)) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const closestX = ax + t * dx;
+  const closestY = ay + t * dy;
+  return Math.sqrt(closestX * closestX + closestY * closestY);
+}
+
+function minDistanceToWay(lat, lon, geometry) {
+  if (geometry.length === 1) {
+    return distanceToSegmentMeters(lat, lon, geometry[0].lat, geometry[0].lon, geometry[0].lat, geometry[0].lon);
+  }
+  let minDist = Infinity;
+  for (let i = 0; i < geometry.length - 1; i++) {
+    const d = distanceToSegmentMeters(
+      lat, lon,
+      geometry[i].lat, geometry[i].lon,
+      geometry[i+1].lat, geometry[i+1].lon
+    );
+    if (d < minDist) minDist = d;
+  }
+  return minDist;
 }
 
 async function reverseGeocode(lat, lon) {
@@ -140,12 +180,8 @@ async function nearestCrossStreet(lat, lon) {
     const roads = [];
     for (const el of data.elements) {
       if (!el.tags || !el.tags.name || !el.geometry) continue;
-      let minDist = Infinity;
-      for (const pt of el.geometry) {
-        const d = haversineMeters(lat, lon, pt.lat, pt.lon);
-        if (d < minDist) minDist = d;
-      }
-      roads.push({ name: el.tags.name, dist: minDist });
+      const dist = minDistanceToWay(lat, lon, el.geometry);
+      roads.push({ name: el.tags.name, dist });
     }
     if (roads.length === 0) continue;
 
@@ -243,11 +279,7 @@ export default {
         const roads = (data.elements || [])
           .filter(el => el.tags && el.tags.name && el.geometry)
           .map(el => {
-            let minDist = Infinity;
-            for (const pt of el.geometry) {
-              const d = haversineMeters(lat, lon, pt.lat, pt.lon);
-              if (d < minDist) minDist = d;
-            }
+            const minDist = minDistanceToWay(lat, lon, el.geometry);
             return { name: el.tags.name, highway: el.tags.highway, distMeters: Math.round(minDist) };
           })
           .sort((a, b) => a.distMeters - b.distMeters);
