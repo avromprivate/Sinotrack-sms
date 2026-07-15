@@ -212,50 +212,41 @@ export default {
     }
 
     if (url.pathname === '/debug-roads') {
-      const lat = url.searchParams.get('lat');
-      const lon = url.searchParams.get('lon');
-      const radius = url.searchParams.get('radius') || '400';
-      const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
-      const resp = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'data=' + encodeURIComponent(query)
-      });
-      const data = await resp.json();
-      const roads = (data.elements || [])
-        .filter(el => el.tags && el.tags.name && el.geometry)
-        .map(el => {
-          let minDist = Infinity;
-          for (const pt of el.geometry) {
-            const d = haversineMeters(lat, lon, pt.lat, pt.lon);
-            if (d < minDist) minDist = d;
-          }
-          return { name: el.tags.name, highway: el.tags.highway, distMeters: Math.round(minDist) };
-        })
-        .sort((a, b) => a.distMeters - b.distMeters);
-      return new Response(JSON.stringify(roads, null, 2), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (url.pathname === '/test-location') {
-      const lat = url.searchParams.get('lat');
-      const lon = url.searchParams.get('lon');
-      const locationStr = await buildLocationString(lat, lon);
-      return new Response(locationStr);
-    }
-
-    if (url.pathname === '/test-full') {
-      const deviceId = url.searchParams.get('device') || '9171061904';
-      const position = await getLastPosition(deviceId);
-      if (position.error) {
-        return new Response('Error fetching position: ' + JSON.stringify(position.raw));
+      try {
+        const lat = url.searchParams.get('lat');
+        const lon = url.searchParams.get('lon');
+        const radius = url.searchParams.get('radius') || '400';
+        if (!lat || !lon) {
+          return new Response('Missing lat/lon query params', { status: 400 });
+        }
+        const query = `[out:json][timeout:10];way(around:${radius},${lat},${lon})[highway][name];out tags geom;`;
+        const resp = await fetch('https://overpass-api.de/api/interpreter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'data=' + encodeURIComponent(query)
+        });
+        const rawText = await resp.text();
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch (e) {
+          return new Response('Overpass did not return JSON. Status: ' + resp.status + '\n\n' + rawText.slice(0, 500));
+        }
+        const roads = (data.elements || [])
+          .filter(el => el.tags && el.tags.name && el.geometry)
+          .map(el => {
+            let minDist = Infinity;
+            for (const pt of el.geometry) {
+              const d = haversineMeters(lat, lon, pt.lat, pt.lon);
+              if (d < minDist) minDist = d;
+            }
+            return { name: el.tags.name, highway: el.tags.highway, distMeters: Math.round(minDist) };
+          })
+          .sort((a, b) => a.distMeters - b.distMeters);
+        return new Response(JSON.stringify(roads, null, 2), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (err) {
+        return new Response('Exception: ' + err.message + '\n' + err.stack, { status: 500 });
       }
-      const locationStr = await buildLocationString(position.dbLat, position.dbLon);
-      const reply = formatReply(position, locationStr);
-      return new Response(reply);
     }
-
-    return new Response('SinoTrack SMS worker is running.');
-  }
-};
