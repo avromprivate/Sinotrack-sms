@@ -1,4 +1,4 @@
-// SinoTrack signed API client + geocoding + test routes
+// SinoTrack signed API client + geocoding + SMS wiring
 
 // --- MD5 (Cloudflare's Web Crypto API does not support MD5 natively) ---
 function md5(str) {
@@ -96,7 +96,7 @@ async function getLastPosition(deviceId) {
   return result;
 }
 
-// --- Geocoding: turn lat/lon into "On Road X near Road Y, Suburb" ---
+// --- Geocoding: turn lat/lon into "Road X near Road Y, Suburb" ---
 function haversineMeters(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = d => d * Math.PI / 180;
@@ -107,10 +107,6 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// Distance from a point to a line segment, using a local flat-earth approximation
-// (accurate enough at this scale — a few hundred metres). This measures true
-// distance to the road itself, not just to the nearest OSM vertex, which matters
-// a lot right at intersections where vertices cluster together.
 function distanceToSegmentMeters(lat, lon, latA, lonA, latB, lonB) {
   const latRad = lat * Math.PI / 180;
   const mPerDegLat = 111320;
@@ -238,10 +234,76 @@ function formatReply(position, locationStr) {
   return `Parked at ${locationStr}. ${agoText}`;
 }
 
+// --- Mobile Message: outbound send + inbound handling ---
+const SMS_SENDER = '61485900177';
+const DEVICE_ID = '9171061904'; // Mummy
+
+function normalizePhone(phone) {
+  if (!phone) return null;
+  let digits = String(phone).replace(/[^0-9]/g, '');
+  if (digits.startsWith('04') && digits.length === 10) {
+    digits = '61' + digits.substring(1);
+  }
+  if (digits.startsWith('4') && digits.length === 9) {
+    digits = '61' + digits;
+  }
+  if (digits.length >= 9) return digits;
+  return null;
+}
+
+async function sendSMS(env, toDigits, message) {
+  await fetch('https://api.mobilemessage.com.au/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Basic ' + btoa(`${env.MOBILEMESSAGE_USERNAME}:${env.MOBILEMESSAGE_PASSWORD}`),
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ messages: [{ to: toDigits, message, sender: SMS_SENDER }] })
+  });
+}
+
+async function handleInbound(data, env) {
+  try {
+    const fromRaw = data.from || data.sender || data.from_number || data.mobile || '';
+    const bodyText = (data.message || '').trim();
+    const digits = normalizePhone(fromRaw);
+    if (!digits) return;
+
+    if (bodyText.toUpperCase() !== 'WHERE') return; // ignore anything else, silently
+
+    const allowedName = await env.TRACKER_KV.get('allowed:' + digits);
+    if (!allowedName) return; // unregistered number — silent, no reply
+
+    const position = await getLastPosition(DEVICE_ID);
+    if (position.error) {
+      await sendSMS(env, digits, 'Could not get location right now. Try again shortly.');
+      return;
+    }
+    const locationStr = await buildLocationString(position.dbLat, position.dbLon);
+    const reply = formatReply(position, locationStr);
+    await sendSMS(env, digits, reply);
+  } catch (err) {
+    // Swallow errors so a bad inbound payload never crashes the webhook response
+  }
+}
+
 // --- Routes ---
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/inbound' && request.method === 'POST') {
+      let data;
+      try {
+        data = await request.json();
+      } catch (e) {
+        data = {};
+      }
+      ctx.waitUntil(handleInbound(data, env));
+      return new Response(JSON.stringify({ status: 'ok' }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
 
     if (url.pathname === '/test-position') {
       const deviceId = url.searchParams.get('device') || '9171061904';
